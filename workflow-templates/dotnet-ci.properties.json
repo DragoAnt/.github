@@ -1,0 +1,14 @@
+{
+  "name": "DragoAnt .NET CI",
+  "description": "Build and test a .NET solution on every push and pull request, with a test and coverage summary, using the DragoAnt reusable dotnet-build workflow.",
+  "iconName": "octicon check-circle",
+  "categories": [
+    "Continuous integration",
+    "C#"
+  ],
+  "filePatterns": [
+    "\\.slnx?$",
+    "\\.csproj$",
+    "global\\.json$"
+  ]
+}
