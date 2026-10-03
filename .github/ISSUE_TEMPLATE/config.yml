@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/DragoAnt/.github/blob/main/SECURITY.md
+    about: Report vulnerabilities privately through the repository's Security tab, never in a public issue.
+  - name: Getting help
+    url: https://github.com/DragoAnt/.github/blob/main/SUPPORT.md
+    about: Where to ask questions and what to include.
