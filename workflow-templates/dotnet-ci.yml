@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - $default-branch
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build and test
+    uses: DragoAnt/.github/.github/workflows/dotnet-build.yml@main
+    with:
+      version: 0.0.0-ci.${{ github.run_number }}

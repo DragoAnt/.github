@@ -1,0 +1,289 @@
+name: dotnet-build
+
+on:
+  workflow_call:
+    inputs:
+      solution:
+        description: Solution or project file to build. Empty picks the single *.slnx, then *.sln, at the repository root.
+        type: string
+        default: ''
+      dotnet-version:
+        description: Extra SDKs/runtimes to install (one per line), on top of the SDK pinned in global-json-file.
+        type: string
+        default: |
+          8.0.x
+          9.0.x
+      global-json-file:
+        description: global.json that pins the SDK. Ignored when the file does not exist.
+        type: string
+        default: global.json
+      configuration:
+        description: Build configuration.
+        type: string
+        default: Release
+      version:
+        description: Package version passed as -p:Version. Empty leaves versioning to the repository's own MSBuild logic.
+        type: string
+        default: ''
+      test-arguments:
+        description: Extra arguments for dotnet test (Microsoft.Testing.Platform). The default fits xUnit v3; JUnit files feed the job summary, Cobertura files the coverage report.
+        type: string
+        default: --report-xunit-trx --report-xunit-junit --coverage --coverage-output-format cobertura
+      coverage-threshold:
+        description: Minimum merged line coverage in percent; 0 only reports.
+        type: number
+        default: 0
+      coverage-assembly-filters:
+        description: ReportGenerator -assemblyfilters value.
+        type: string
+        default: -*.Tests;-*.Tests.*;-*.Benchmarks
+      reportgenerator-version:
+        description: dotnet-reportgenerator-globaltool version.
+        type: string
+        default: 5.5.11
+      pack:
+        description: Run dotnet pack and upload the packages artifact.
+        type: boolean
+        default: false
+      runs-on:
+        description: Runner label.
+        type: string
+        default: ubuntu-24.04
+      timeout-minutes:
+        description: Job timeout.
+        type: number
+        default: 30
+    outputs:
+      packages-artifact:
+        description: Name of the uploaded packages artifact (set when pack is true).
+        value: ${{ jobs.build.outputs.packages-artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    outputs:
+      packages-artifact: ${{ steps.pack.outputs.artifact }}
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+      CONFIGURATION: ${{ inputs.configuration }}
+      VERSION: ${{ inputs.version }}
+      RESULTS_DIR: ${{ github.workspace }}/TestResults
+      COVERAGE_DIR: ${{ github.workspace }}/coverage
+      PACKAGES_DIR: ${{ github.workspace }}/packages
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Resolve inputs
+        id: resolve
+        env:
+          SOLUTION: ${{ inputs.solution }}
+          GLOBAL_JSON: ${{ inputs.global-json-file }}
+        run: |
+          if [ -z "$SOLUTION" ]; then
+            for pattern in '*.slnx' '*.sln'; do
+              mapfile -t found < <(find . -maxdepth 1 -name "$pattern" -printf '%f\n' | sort)
+              if [ "${#found[@]}" -gt 1 ]; then
+                echo "::error::several $pattern files at the repository root (${found[*]}); set the 'solution' input"
+                exit 1
+              fi
+              if [ "${#found[@]}" -eq 1 ]; then SOLUTION="${found[0]}"; break; fi
+            done
+          fi
+          if [ -n "$SOLUTION" ] && [ ! -f "$SOLUTION" ]; then
+            echo "::error::solution '$SOLUTION' not found"
+            exit 1
+          fi
+          echo "solution=$SOLUTION" >> "$GITHUB_OUTPUT"
+          if [ -n "$GLOBAL_JSON" ] && [ -f "$GLOBAL_JSON" ]; then
+            echo "global-json=$GLOBAL_JSON" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Solution: ${SOLUTION:-<repository root>}"
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+          global-json-file: ${{ steps.resolve.outputs.global-json }}
+
+      - name: NuGet cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('global.json', '**/Directory.Packages.props', '**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build properties
+        env:
+          SOLUTION: ${{ steps.resolve.outputs.solution }}
+        run: |
+          props="-p:ContinuousIntegrationBuild=true"
+          if [ -n "$VERSION" ]; then props="$props -p:Version=$VERSION"; fi
+          {
+            echo "BUILD_PROPS=$props"
+            echo "SOLUTION=$SOLUTION"
+          } >> "$GITHUB_ENV"
+
+      - name: Restore
+        run: |
+          # shellcheck disable=SC2086
+          dotnet restore ${SOLUTION:+"$SOLUTION"} $BUILD_PROPS
+
+      - name: Build
+        run: |
+          # shellcheck disable=SC2086
+          dotnet build ${SOLUTION:+"$SOLUTION"} -c "$CONFIGURATION" --no-restore $BUILD_PROPS
+
+      - name: Test
+        env:
+          TEST_ARGUMENTS: ${{ inputs.test-arguments }}
+        run: |
+          # shellcheck disable=SC2086
+          dotnet test ${SOLUTION:+--solution "$SOLUTION"} -c "$CONFIGURATION" --no-build --no-progress \
+            --results-directory "$RESULTS_DIR" $TEST_ARGUMENTS
+
+      - name: Test summary
+        if: ${{ !cancelled() }}
+        shell: python
+        run: |
+          import glob, os, re
+          import xml.etree.ElementTree as ET
+
+          results = os.environ["RESULTS_DIR"]
+          rows, failures = [], []
+          for path in sorted(glob.glob(os.path.join(results, "**", "*.junit.xml"), recursive=True)):
+              for suite in ET.parse(path).getroot().iter("testsuite"):
+                  name = suite.get("name", "")
+                  parts = re.split(r"[\\/]", name)
+                  tfm = next((p for p in reversed(parts[:-1]) if re.fullmatch(r"net[\d.]+.*", p)), "")
+                  assembly = re.sub(r"\.(dll|exe)$", "", parts[-1])
+                  total = int(suite.get("tests", 0))
+                  failed = int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+                  skipped = int(suite.get("skipped", 0) or suite.get("disabled", 0))
+                  rows.append((assembly, tfm, total - failed - skipped, failed, skipped, float(suite.get("time", 0))))
+                  for case in suite.iter("testcase"):
+                      problem = case.find("failure")
+                      if problem is None:
+                          problem = case.find("error")
+                      if problem is not None:
+                          message = (problem.get("message") or problem.text or "").strip().splitlines()
+                          failures.append((assembly, tfm, case.get("name", ""), message[0][:300] if message else ""))
+
+          lines = ["## Test results", ""]
+          if not rows:
+              lines.append("No JUnit results found — add a JUnit report option to `test-arguments` to get this table.")
+          else:
+              passed, failed, skipped = (sum(r[i] for r in rows) for i in (2, 3, 4))
+              icon = ":x:" if failed else ":white_check_mark:"
+              lines += [f"{icon} **{passed} passed**, **{failed} failed**, {skipped} skipped", "",
+                        "| Assembly | TFM | Passed | Failed | Skipped | Time |",
+                        "| --- | --- | ---: | ---: | ---: | ---: |"]
+              lines += [f"| {a} | {t} | {p} | {f} | {s} | {d:.1f}s |" for a, t, p, f, s, d in rows]
+              if failures:
+                  lines += ["", "### Failed tests", "", "| Test | TFM | Message |", "| --- | --- | --- |"]
+                  for a, t, n, m in failures[:50]:
+                      cell = m.replace("|", r"\|")
+                      lines.append(f"| `{n}` | {t} | {cell} |")
+                  if len(failures) > 50:
+                      lines.append(f"| … {len(failures) - 50} more | | |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n\n")
+
+      - name: Coverage report
+        id: coverage
+        if: ${{ !cancelled() && hashFiles('TestResults/**/*.cobertura.xml') != '' }}
+        env:
+          RG_VERSION: ${{ inputs.reportgenerator-version }}
+          ASSEMBLY_FILTERS: ${{ inputs.coverage-assembly-filters }}
+        run: |
+          dotnet tool install dotnet-reportgenerator-globaltool --version "$RG_VERSION" --tool-path "$RUNNER_TEMP/reportgenerator"
+          "$RUNNER_TEMP/reportgenerator/reportgenerator" \
+            "-reports:$RESULTS_DIR/**/*.cobertura.xml" \
+            "-targetdir:$COVERAGE_DIR" \
+            "-reporttypes:MarkdownSummaryGithub;Cobertura;HtmlInline" \
+            "-assemblyfilters:$ASSEMBLY_FILTERS"
+          cat "$COVERAGE_DIR/SummaryGithub.md" >> "$GITHUB_STEP_SUMMARY"
+          rate=$(grep -oE '<coverage [^>]*line-rate="[0-9.]+"' "$COVERAGE_DIR/Cobertura.xml" | grep -oE 'line-rate="[0-9.]+"' | grep -oE '[0-9.]+')
+          echo "line-rate=$rate" >> "$GITHUB_OUTPUT"
+
+      - name: Coverage threshold
+        if: ${{ !cancelled() && inputs.coverage-threshold > 0 }}
+        env:
+          THRESHOLD: ${{ inputs.coverage-threshold }}
+          LINE_RATE: ${{ steps.coverage.outputs.line-rate }}
+        run: |
+          if [ -z "$LINE_RATE" ]; then
+            echo "::error::coverage-threshold is $THRESHOLD% but no coverage was collected"
+            exit 1
+          fi
+          awk -v rate="$LINE_RATE" -v min="$THRESHOLD" 'BEGIN {
+            pct = rate * 100
+            printf "Line coverage %.1f%% (minimum %s%%)\n", pct, min
+            if (pct + 1e-9 < min) { printf "::error::line coverage %.1f%% is below the %s%% threshold\n", pct, min; exit 1 }
+          }'
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results
+          path: ${{ env.RESULTS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload coverage
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: ${{ env.COVERAGE_DIR }}
+          retention-days: 14
+
+      - name: Pack
+        id: pack
+        if: ${{ inputs.pack }}
+        run: |
+          # shellcheck disable=SC2086
+          dotnet pack ${SOLUTION:+"$SOLUTION"} -c "$CONFIGURATION" --no-build -o "$PACKAGES_DIR" $BUILD_PROPS
+          mapfile -t packages < <(find "$PACKAGES_DIR" -maxdepth 1 -name '*.nupkg' -printf '%f\n' | sort)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "::error::dotnet pack produced no packages"
+            exit 1
+          fi
+          {
+            echo "## Packages"
+            echo
+            for package in "${packages[@]}"; do echo "- \`$package\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$VERSION" ]; then
+            for package in "${packages[@]}"; do
+              case "$package" in
+                *."$VERSION".nupkg) ;;
+                *) echo "::error::$package does not carry version $VERSION"; exit 1 ;;
+              esac
+            done
+          fi
+          echo "artifact=packages" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packages
+        if: ${{ inputs.pack }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packages
+          path: |
+            ${{ env.PACKAGES_DIR }}/*.nupkg
+            ${{ env.PACKAGES_DIR }}/*.snupkg
+          if-no-files-found: error
+          retention-days: 30

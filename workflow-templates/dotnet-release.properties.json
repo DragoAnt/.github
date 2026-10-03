@@ -1,0 +1,13 @@
+{
+  "name": "DragoAnt NuGet release",
+  "description": "Publish NuGet packages to nuget.org when a GitHub release is published: version from the tag, build, test and pack once, then push with nuget.org Trusted Publishing.",
+  "iconName": "octicon package",
+  "categories": [
+    "Deployment",
+    "C#"
+  ],
+  "filePatterns": [
+    "\\.slnx?$",
+    "\\.csproj$"
+  ]
+}

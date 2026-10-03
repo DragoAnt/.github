@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as documented.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security issues must not be filed here — use the repository's **Security** tab → **Report a vulnerability**.
+  - type: input
+    id: package
+    attributes:
+      label: Package and version
+      placeholder: DragoAnt.Example 1.2.3
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Target framework and OS
+      placeholder: net9.0 on Ubuntu 24.04
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest code, input and configuration that shows the problem.
+      render: csharp
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the full exception and stack trace, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Workarounds you found, the last version that worked, links.
